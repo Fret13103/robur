@@ -305,7 +305,7 @@ function Orbwalker:AADamageTo(Obj)
 	if self:HasItem("ItemSwordOfFeastAndFamine") then 
 		bonus_phys = bonus_phys + (self:Melee() and .12 or .08) * Obj.AsAI.Health
 	end
-	return DMGLib:CalcPhysicalDamage(self.Player, Obj, self:AutoDamage() + bonus_phys)
+	return DMGLib:CalcPhysicalDamage(self.Player.AsAI, Obj.AsAI, self:AutoDamage() + bonus_phys)
 end
 
 function Orbwalker:PredictMinionHealth(Minion, Delay)
