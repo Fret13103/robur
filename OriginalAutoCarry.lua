@@ -43,7 +43,7 @@ setmetatable(OACEvent, {
 })
 
 function OACEvent:Fire(...)
-	local args = table.pack(...) --lua5.1 passing ... as argument passes it as a table, packing and passing unpack call will pass as separate args
+	local args = {...} --lua5.1 passing ... as argument passes it as a table, packing and passing unpack call will pass as separate args
 	for HookId, Hook in pairs(self.Listeners) do
 		Hook(unpack(args))
 	end
@@ -83,6 +83,9 @@ function MissileManager:ProcessObjectCreated(Obj)
 		end
 			
 		if Obj.SrcHandle and Obj.TargetHandle then
+			if Obj.AsMissile.Source.Handle == Player.Handle and Obj.Name:lower():find("attack") then
+				Orbwalker.Events.OnPostAttack:Fire(Obj.AsMissile.Target)
+			end
 
 			MissileManager.Missiles[Obj.__obj] = Obj
 
@@ -141,11 +144,21 @@ function Orbwalker:Init()
 	self._ProjectileSpeed = 1000
 	self.LastAttackStart = self:GetTick()
 
+	self.PluginBlockAttack = false
+
 	self.KeyBinds = {
 		Clear = 86,
 		Combo = 32,
 		Farm = 88,
 		Harrass = 67,
+	}
+
+	self.Events = {
+		OnPreAttack = OACEvent(), --target
+		OnPostAttack = OACEvent(), --target
+		OnCantKillMinion = OACEvent(), --minion [NOT YET IMPLEMENTED :(] (I need to check if minions will die before I can auto, but that there is no missile from me to the minion)
+		OnPreMove = OACEvent(), --position
+		OnPostMove = OACEvent() --position
 	}
 
 	self.Keys = {}
@@ -243,13 +256,23 @@ function Orbwalker:CanMove()
 end
 
 function Orbwalker:Attack(AIBase)
+	self.PluginBlockAttack = false
+	self.Events.OnPreAttack:Fire(AIBase)
+	if self.PluginBlockAttack then return end
+
 	self.LastAttackStart = self:GetTick()
 	Input.Attack(AIBase)
 end
 
 function Orbwalker:MoveTo(v)
+	self.PluginBlockMove = false
+	self.Events.OnPreMove:Fire(v)
+	if self.PluginBlockMove then return end
+
 	Input.MoveTo(v)
 	self.LastMoveTick = self:GetTick()
+
+	self.Events.OnPostMove:Fire(v)
 end
 
 --[[
@@ -355,22 +378,12 @@ function Orbwalker:GetSafeMinions()
 	local EnemyMinions = ObjManager.Get("enemy", "minions")
 	local Hit = {}
 
-	local AlienMinions = ObjManager.Get("neutral", "minions")
-
-	local EnemyStructures = ObjManager.Get("enemy", "turrets")
-
 	for _, Minion in pairs(EnemyMinions) do
 		if BBDist(Minion,Player) < self.Range then
 			local damage = Minion.AsAttackableUnit.Health - self:PredictMinionHealth(Minion, self.Player.Position:Distance(Minion.Position)/self.ProjectileSpeed + self.AttackDelay)
 			if Minion.AsAttackableUnit.Health - 2*damage > self:AADamageTo(Minion) then
 				table.insert(Hit, Minion)
 			end
-		end
-	end
-
-	for x, y in pairs(AlienMinions) do
-		if BBDist(y,Player) < self.Range then
-			table.insert(Hit, y)
 		end
 	end
 
@@ -410,6 +423,11 @@ function Orbwalker:LastHitTurret()
 		return
 	end
 
+	local lasthitminions = self:GetLastHitMinions()
+	if self:ValidTarget(lasthitminions[1]) and self:CanAttack() then
+		self:Attack(lasthitminions[1])
+	end
+
 	if self:CanMove() then
 		self:MoveTo(Renderer:GetMousePos())
 	end
@@ -437,15 +455,51 @@ function Orbwalker:LastHit()
 	end
 end
 
+function Orbwalker:ValidTarget(Object)
+	return Object and Object.__obj and Object.AsAttackableUnit and Object.AsAttackableUnit.IsAlive and Object.AsAttackableUnit.IsTargetable and Object.AsAttackableUnit.IsVisible 
+end
+
+function Orbwalker:GetJungleTargetMinion()
+	local jngminions = ObjManager.Get("neutral", "minions")
+
+	local target, health = nil, 0
+	for _, minion in pairs(jngminions) do
+			if self:ValidTarget(minion) and BBDist(self.Player, minion) < self.Range and not(minion.Name:lower():find("plant")) then
+				if minion.AsAttackableUnit.MaxHealth > health then
+					health = minion.AsAttackableUnit.MaxHealth
+					target = minion
+				end
+			end
+	end
+
+	return target
+end
+
+function Orbwalker:GetStructureTarget()
+	local turrets = ObjManager.Get("enemy", "turrets")
+	local inhibs = ObjManager.Get("enemy", "inhibitors")
+	local hq = ObjManager.Get("enemy", "hq")
+
+	for i,v in pairs(turrets) do
+		if self:ValidTarget(v) and BBDist(v, self.Player) < self.Range then
+			Renderer.DrawCircle3D(v.Position, 100, 10, 1, self:RGBA(255,0,0,255))
+		end
+	end
+end
+
 function Orbwalker:LaneClear()
 	local DieMinions = self:GetLastHitMinions()
 	local PushMinions = self:GetSafeMinions()
 	local DangerMinions = self:GetNextHitMinions()
 
-	local target = DieMinions[1] 
-	if not DangerMinions[1] then target = self:GetHeroTarget() or PushMinions[1] end
+	local JungleMinionTarget = self:GetJungleTargetMinion()
 
-	if target and self:CanAttack() and target.AsMinion.IsAlive and target.AsMinion.IsTargetable then
+	--local StructureTarget = self:GetStructureTarget()
+
+	local target = DieMinions[1] 
+	if not DangerMinions[1] then target = self:GetHeroTarget() or PushMinions[1] or JungleMinionTarget end
+
+	if target and target.AsMinion and self:CanAttack() and target.AsMinion.IsAlive and target.AsMinion.IsTargetable then
 		self:Attack(target)
 	end
 
@@ -509,11 +563,26 @@ function Orbwalker:DebugText(t, adornee, offset)
 	self.DebugTextCount = self.DebugTextCount+1
 end
 
+function Orbwalker:RGBA(r,g,b,a)
+	return a + 16*16*b + 16*16*16*16*g + 16*16*16*16*16*16*r
+end
+
 function Orbwalker:OnDraw()
-	Renderer.DrawCircle3D(Player.Position, self.Range + self.Player.AsAI.BoundingRadius, 30, 1, 0xffffffff)
+	Renderer.DrawCircle3D(Player.Position, self.Range + self.Player.AsAI.BoundingRadius, 30, 1, self:RGBA(255,255,255,255))
 
 	for i,v in pairs(ObjManager.Get("enemy", "heroes")) do
-		Renderer.DrawCircle3D(v.Position, v.AsAI.AttackRange+v.AsAI.BoundingRadius, 10, 1, 0xffffffff)
+		Renderer.DrawCircle3D(v.Position, v.AsAI.AttackRange+v.AsAI.BoundingRadius, 30, 1, 0xffffffff)
+	end
+
+	local JungleMinionTarget = self:GetJungleTargetMinion()
+	if self:ValidTarget(JungleMinionTarget) then
+		Renderer.DrawCircle3D(JungleMinionTarget.Position, 300, 20, 1, 0xffffffff)
+	end
+
+	for i,v in pairs(ObjManager.Get("enemy", "turrets")) do
+		if self:ValidTarget(v) then
+			Renderer.DrawCircle3D(v.Position, (800)+self.Player.AsAI.BoundingRadius, 20, 5, self:RGBA(255,0,0,255))
+		end
 	end
 end
 
